@@ -3,11 +3,13 @@ import pandas as pd
 import random
 import io
 from streamlit_cookies_controller import CookieController
+from gtts import gTTS
 
 st.set_page_config(page_title="TOEIC Verbs", layout="centered")
 
 controller = CookieController()
 
+# --- DONNÉES ---
 csv_data = """Infinitive;Preterit;Past Participle;Translation
 be;was/were;been;être / avoir
 do;did;done;faire
@@ -143,117 +145,219 @@ def load_data():
 df = load_data()
 cols = ["Infinitive", "Preterit", "Past Participle", "Translation"]
 
-# Get saved errors from browser storage
+@st.cache_data(show_spinner=False)
+def get_audio(text):
+    tts = gTTS(text=text, lang='en-US')
+    fp = io.BytesIO()
+    tts.write_to_fp(fp)
+    return fp.getvalue()
+
+# --- LECTURE DES COOKIES ---
 saved_errors = controller.get('toeic_errors')
 if type(saved_errors) is not list:
     saved_errors = []
 saved_errors = [int(i) for i in saved_errors if str(i).isdigit()]
 
-if 'error_list' not in st.session_state:
-    st.session_state.error_list = saved_errors
-if 'current_queue' not in st.session_state:
-    st.session_state.current_queue = []
-if 'current_verb' not in st.session_state:
-    st.session_state.current_verb = None
-if 'given_col' not in st.session_state:
-    st.session_state.given_col = None
-if 'score' not in st.session_state:
-    st.session_state.score = 0
-if 'total_in_session' not in st.session_state:
-    st.session_state.total_in_session = 0
-if 'show_correction' not in st.session_state:
-    st.session_state.show_correction = False
-if 'last_verb' not in st.session_state:
-    st.session_state.last_verb = None
+saved_session = controller.get('toeic_session')
+
+# --- INITIALISATION ETAT ---
+if 'error_list' not in st.session_state: st.session_state.error_list = saved_errors
+if 'app_mode' not in st.session_state: st.session_state.app_mode = "menu"
+if 'queue' not in st.session_state: st.session_state.queue = []
+if 'current_idx' not in st.session_state: st.session_state.current_idx = None
+if 'given_col' not in st.session_state: st.session_state.given_col = None
+if 'score' not in st.session_state: st.session_state.score = 0
+if 'total' not in st.session_state: st.session_state.total = 0
+if 'show_correction' not in st.session_state: st.session_state.show_correction = False
+if 'last_idx' not in st.session_state: st.session_state.last_idx = None
+if 'flashcard_revealed' not in st.session_state: st.session_state.flashcard_revealed = False
 
 st.title("TOEIC Irregular Verbs")
 
-if st.session_state.show_correction:
-    st.error("Erreur sur le verbe précédent :")
-    v = st.session_state.last_verb
-    st.write(f"**Infinitif:** {v['Infinitive']}")
-    st.write(f"**Prétérit:** {v['Preterit']}")
-    st.write(f"**Participe Passé:** {v['Past Participle']}")
-    st.write(f"**Traduction:** {v['Translation']}")
+# ====================================================
+# MODE : MENU PRINCIPAL
+# ====================================================
+if st.session_state.app_mode == "menu":
     
-    if st.button("Continuer", use_container_width=True):
-        st.session_state.show_correction = False
-        st.rerun()
-
-elif st.session_state.current_verb is not None:
-    progress = st.session_state.total_in_session - len(st.session_state.current_queue)
-    st.progress(progress / st.session_state.total_in_session, text=f"Verbe {progress} / {st.session_state.total_in_session}")
-    
-    v = st.session_state.current_verb
-    given_c = st.session_state.given_col
-    missing_cols = [c for c in cols if c != given_c]
-    
-    st.markdown(f"### {given_c} : **{v[given_c]}**")
-    
-    with st.form("verb_form", clear_on_submit=True):
-        user_inputs = {}
-        for col_name in missing_cols:
-            user_inputs[col_name] = st.text_input(f"{col_name} :", autocomplete="off")
-        
-        submitted = st.form_submit_button("Valider", use_container_width=True)
-        
-        if submitted:
-            success = True
-            for col_name in missing_cols:
-                expected = str(v[col_name]).strip().lower()
-                user_ans = str(user_inputs[col_name]).strip().lower()
-                if user_ans != expected:
-                    success = False
-            
-            if success:
-                st.session_state.score += 1
-                if v.name in st.session_state.error_list:
-                    st.session_state.error_list.remove(v.name)
-                    controller.set('toeic_errors', st.session_state.error_list)
-            else:
-                if v.name not in st.session_state.error_list:
-                    st.session_state.error_list.append(v.name)
-                    controller.set('toeic_errors', st.session_state.error_list)
-                st.session_state.last_verb = v
-                st.session_state.show_correction = True
-
-            if st.session_state.current_queue:
-                idx = st.session_state.current_queue.pop(0)
-                st.session_state.current_verb = df.iloc[idx]
-                st.session_state.given_col = random.choice(cols)
-            else:
-                st.session_state.current_verb = None
-            
+    # 1. Zone de reprise de session
+    if saved_session and type(saved_session) is dict and len(saved_session.get('queue', [])) > 0:
+        st.info(f"Session en pause : {len(saved_session['queue'])} verbes restants.")
+        if st.button("Reprendre la session", type="primary", use_container_width=True):
+            st.session_state.queue = saved_session['queue']
+            st.session_state.score = saved_session['score']
+            st.session_state.total = saved_session['total']
+            st.session_state.current_idx = saved_session['current_idx']
+            st.session_state.given_col = saved_session['given_col']
+            st.session_state.app_mode = "training"
+            controller.set('toeic_session', {}) # On vide la sauvegarde
             st.rerun()
+        st.write("---")
 
-elif st.session_state.total_in_session > 0:
-    st.success(f"Session terminée ! Score : {st.session_state.score} / {st.session_state.total_in_session}")
-    if st.button("Retour au menu", use_container_width=True):
-        st.session_state.score = 0
-        st.session_state.total_in_session = 0
-        st.rerun()
-
-else:
-    st.subheader("Nouvelle session")
-    
-    mode = st.radio("Mode :", ["Tous les verbes", "Révision des erreurs"])
-    
-    if mode == "Tous les verbes":
-        nb_verbs = st.selectbox("Nombre de verbes :", [20, 50, 100, 127])
-    
-    if st.button("Démarrer", use_container_width=True):
-        if mode == "Révision des erreurs" and len(st.session_state.error_list) == 0:
+    # 2. Zone Flashcards
+    st.subheader("1. Flashcards (Révision)")
+    fc_mode = st.radio("Source Flashcards :", ["Tous les verbes", "Mes erreurs"], key="fc_radio")
+    if st.button("Lancer Flashcards", use_container_width=True):
+        if fc_mode == "Mes erreurs" and len(st.session_state.error_list) == 0:
             st.warning("Aucune erreur enregistrée pour le moment.")
         else:
-            source_df = df.iloc[st.session_state.error_list] if mode == "Révision des erreurs" else df
-            sample_size = len(source_df) if mode == "Révision des erreurs" else min(nb_verbs, len(source_df))
+            source_df = df.iloc[st.session_state.error_list] if fc_mode == "Mes erreurs" else df
+            st.session_state.queue = source_df.sample(frac=1).index.tolist() # Mélange total
+            st.session_state.app_mode = "flashcards"
+            st.session_state.flashcard_revealed = False
+            st.rerun()
             
-            st.session_state.current_queue = source_df.sample(sample_size).index.tolist()
-            st.session_state.total_in_session = sample_size
+    st.write("---")
+    
+    # 3. Zone Entraînement
+    st.subheader("2. S'entraîner")
+    tr_mode = st.radio("Source Entraînement :", ["Tous les verbes", "Mes erreurs"], key="tr_radio")
+    
+    if tr_mode == "Tous les verbes":
+        nb_verbs = st.selectbox("Nombre de verbes :", [20, 50, 100, 127])
+    
+    if st.button("Lancer Entraînement", use_container_width=True):
+        if tr_mode == "Mes erreurs" and len(st.session_state.error_list) == 0:
+            st.warning("Aucune erreur enregistrée pour le moment.")
+        else:
+            source_df = df.iloc[st.session_state.error_list] if tr_mode == "Mes erreurs" else df
+            sample_size = len(source_df) if tr_mode == "Mes erreurs" else min(nb_verbs, len(source_df))
+            
+            st.session_state.queue = source_df.sample(sample_size).index.tolist()
+            st.session_state.total = sample_size
             st.session_state.score = 0
             
-            idx = st.session_state.current_queue.pop(0)
-            st.session_state.current_verb = df.iloc[idx]
+            st.session_state.current_idx = st.session_state.queue.pop(0)
             st.session_state.given_col = random.choice(cols)
+            st.session_state.app_mode = "training"
             st.rerun()
 
+# ====================================================
+# MODE : FLASHCARDS
+# ====================================================
+elif st.session_state.app_mode == "flashcards":
+    if not st.session_state.queue:
+        st.success("Toutes les flashcards ont été vues !")
+        if st.button("Retour au menu", use_container_width=True):
+            st.session_state.app_mode = "menu"
+            st.rerun()
+    else:
+        idx = st.session_state.queue[0]
+        v = df.iloc[idx]
+        
+        st.markdown(f"## {v['Infinitive']}")
+        st.audio(get_audio(v['Infinitive']), format="audio/mp3")
+        
+        if not st.session_state.flashcard_revealed:
+            if st.button("Révéler", use_container_width=True):
+                st.session_state.flashcard_revealed = True
+                st.rerun()
+        else:
+            st.info(f"**Prétérit:** {v['Preterit']}  \n**Participe Passé:** {v['Past Participle']}  \n**Traduction:** {v['Translation']}")
+            st.audio(get_audio(f"{v['Infinitive']}, {v['Preterit']}, {v['Past Participle']}"), format="audio/mp3")
+            
+            if st.button("Suivant", type="primary", use_container_width=True):
+                st.session_state.queue.pop(0)
+                st.session_state.flashcard_revealed = False
+                st.rerun()
+        
+        st.write("---")
+        if st.button("Quitter les flashcards"):
+            st.session_state.app_mode = "menu"
+            st.rerun()
+
+# ====================================================
+# MODE : ENTRAÎNEMENT
+# ====================================================
+elif st.session_state.app_mode == "training":
+    
+    # 1. Affichage de la correction si erreur au verbe précédent
+    if st.session_state.show_correction:
+        st.error("Erreur sur le verbe précédent :")
+        v_last = df.iloc[st.session_state.last_idx]
+        st.write(f"**Infinitif:** {v_last['Infinitive']}")
+        st.write(f"**Prétérit:** {v_last['Preterit']}")
+        st.write(f"**Participe Passé:** {v_last['Past Participle']}")
+        st.write(f"**Traduction:** {v_last['Translation']}")
+        
+        if st.button("Continuer", use_container_width=True):
+            st.session_state.show_correction = False
+            st.rerun()
+            
+    # 2. Fin de session
+    elif st.session_state.current_idx is None:
+        st.success(f"Session terminée ! Score : {st.session_state.score} / {st.session_state.total}")
+        if st.button("Retour au menu", use_container_width=True):
+            st.session_state.app_mode = "menu"
+            st.rerun()
+            
+    # 3. Interface de saisie
+    else:
+        progress = st.session_state.total - len(st.session_state.queue)
+        st.progress(progress / st.session_state.total, text=f"Verbe {progress} / {st.session_state.total}")
+        
+        v = df.iloc[st.session_state.current_idx]
+        given_c = st.session_state.given_col
+        missing_cols = [c for c in cols if c != given_c]
+        
+        st.markdown(f"### {given_c} : **{v[given_c]}**")
+        
+        # Audio si la colonne donnée est en anglais
+        if given_c != "Translation":
+            st.audio(get_audio(v[given_c]), format="audio/mp3")
+        
+        with st.form("verb_form", clear_on_submit=True):
+            user_inputs = {}
+            for col_name in missing_cols:
+                user_inputs[col_name] = st.text_input(f"{col_name} :", autocomplete="off")
+            
+            submitted = st.form_submit_button("Valider", use_container_width=True)
+            
+            if submitted:
+                success = True
+                for col_name in missing_cols:
+                    expected = str(v[col_name]).strip().lower()
+                    user_ans = str(user_inputs[col_name]).strip().lower()
+                    if user_ans != expected:
+                        success = False
+                
+                if success:
+                    st.session_state.score += 1
+                    if st.session_state.current_idx in st.session_state.error_list:
+                        st.session_state.error_list.remove(st.session_state.current_idx)
+                        controller.set('toeic_errors', st.session_state.error_list)
+                else:
+                    if st.session_state.current_idx not in st.session_state.error_list:
+                        st.session_state.error_list.append(st.session_state.current_idx)
+                        controller.set('toeic_errors', st.session_state.error_list)
+                    st.session_state.last_idx = st.session_state.current_idx
+                    st.session_state.show_correction = True
+
+                # Passage au verbe suivant
+                if st.session_state.queue:
+                    st.session_state.current_idx = st.session_state.queue.pop(0)
+                    st.session_state.given_col = random.choice(cols)
+                else:
+                    st.session_state.current_idx = None
+                
+                st.rerun()
+                
+        # Options de contrôle (Pause / Quitter)
+        st.write("---")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Mettre en pause"):
+                session_data = {
+                    'queue': st.session_state.queue,
+                    'total': st.session_state.total,
+                    'score': st.session_state.score,
+                    'current_idx': st.session_state.current_idx,
+                    'given_col': st.session_state.given_col
+                }
+                controller.set('toeic_session', session_data)
+                st.session_state.app_mode = "menu"
+                st.rerun()
+        with col2:
+            if st.button("Quitter la session"):
+                controller.set('toeic_session', {})
+                st.session_state.app_mode = "menu"
+                st.rerun()
