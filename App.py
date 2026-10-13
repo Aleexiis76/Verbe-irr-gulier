@@ -168,34 +168,7 @@ if 'last_verb' not in st.session_state:
 
 st.title("TOEIC Irregular Verbs")
 
-st.title("TOEIC Irregular Verbs")
-
-if not st.session_state.current_queue and not st.session_state.current_verb and not st.session_state.show_correction:
-    st.subheader("Nouvelle session")
-    
-    mode = st.radio("Mode :", ["Tous les verbes", "Révision des erreurs"])
-    
-    if mode == "Tous les verbes":
-        nb_verbs = st.selectbox("Nombre de verbes :", [20, 50, 100, 127])
-    
-    if st.button("Démarrer", use_container_width=True):
-        if mode == "Révision des erreurs" and len(st.session_state.error_list) == 0:
-            st.warning("Aucune erreur enregistrée pour le moment.")
-        else:
-            source_df = df.iloc[st.session_state.error_list] if mode == "Révision des erreurs" else df
-            # Force la taille totale des erreurs si ce mode est actif
-            sample_size = len(source_df) if mode == "Révision des erreurs" else min(nb_verbs, len(source_df))
-            
-            st.session_state.current_queue = source_df.sample(sample_size).index.tolist()
-            st.session_state.total_in_session = sample_size
-            st.session_state.score = 0
-            
-            idx = st.session_state.current_queue.pop(0)
-            st.session_state.current_verb = df.iloc[idx]
-            st.session_state.given_col = random.choice(cols)
-            st.rerun()
-
-elif st.session_state.show_correction:
+if st.session_state.show_correction:
     st.error("Erreur sur le verbe précédent :")
     v = st.session_state.last_verb
     st.write(f"**Infinitif:** {v['Infinitive']}")
@@ -253,9 +226,34 @@ elif st.session_state.current_verb is not None:
             
             st.rerun()
 
-else:
+elif st.session_state.total_in_session > 0:
     st.success(f"Session terminée ! Score : {st.session_state.score} / {st.session_state.total_in_session}")
     if st.button("Retour au menu", use_container_width=True):
         st.session_state.score = 0
         st.session_state.total_in_session = 0
         st.rerun()
+
+else:
+    st.subheader("Nouvelle session")
+    
+    mode = st.radio("Mode :", ["Tous les verbes", "Révision des erreurs"])
+    
+    if mode == "Tous les verbes":
+        nb_verbs = st.selectbox("Nombre de verbes :", [20, 50, 100, 127])
+    
+    if st.button("Démarrer", use_container_width=True):
+        if mode == "Révision des erreurs" and len(st.session_state.error_list) == 0:
+            st.warning("Aucune erreur enregistrée pour le moment.")
+        else:
+            source_df = df.iloc[st.session_state.error_list] if mode == "Révision des erreurs" else df
+            sample_size = len(source_df) if mode == "Révision des erreurs" else min(nb_verbs, len(source_df))
+            
+            st.session_state.current_queue = source_df.sample(sample_size).index.tolist()
+            st.session_state.total_in_session = sample_size
+            st.session_state.score = 0
+            
+            idx = st.session_state.current_queue.pop(0)
+            st.session_state.current_verb = df.iloc[idx]
+            st.session_state.given_col = random.choice(cols)
+            st.rerun()
+
