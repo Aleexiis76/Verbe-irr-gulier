@@ -1,1 +1,2 @@
-# Verbe-irr-gulier
+streamlit
+pandas
