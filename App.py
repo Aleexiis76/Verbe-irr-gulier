@@ -2,11 +2,12 @@ import streamlit as st
 import pandas as pd
 import random
 import io
+from streamlit_cookies_controller import CookieController
 
-# Configuration de la page pour mobile
 st.set_page_config(page_title="TOEIC Verbs", layout="centered")
 
-# Données des 127 verbes (A1-B2)
+controller = CookieController()
+
 csv_data = """Infinitive;Preterit;Past Participle;Translation
 be;was/were;been;être / avoir
 do;did;done;faire
@@ -142,9 +143,14 @@ def load_data():
 df = load_data()
 cols = ["Infinitive", "Preterit", "Past Participle", "Translation"]
 
-# Initialisation des variables d'état (mémoire de la session)
+# Get saved errors from browser storage
+saved_errors = controller.get('toeic_errors')
+if type(saved_errors) is not list:
+    saved_errors = []
+saved_errors = [int(i) for i in saved_errors if str(i).isdigit()]
+
 if 'error_list' not in st.session_state:
-    st.session_state.error_list = []
+    st.session_state.error_list = saved_errors
 if 'current_queue' not in st.session_state:
     st.session_state.current_queue = []
 if 'current_verb' not in st.session_state:
@@ -162,7 +168,6 @@ if 'last_verb' not in st.session_state:
 
 st.title("TOEIC Irregular Verbs")
 
-# Menu de configuration
 if not st.session_state.current_queue and not st.session_state.current_verb and not st.session_state.show_correction:
     st.subheader("Nouvelle session")
     col1, col2 = st.columns(2)
@@ -181,13 +186,11 @@ if not st.session_state.current_queue and not st.session_state.current_verb and 
             st.session_state.total_in_session = sample_size
             st.session_state.score = 0
             
-            # Prépare le premier verbe
             idx = st.session_state.current_queue.pop(0)
             st.session_state.current_verb = df.iloc[idx]
             st.session_state.given_col = random.choice(cols)
             st.rerun()
 
-# Affichage de la correction
 elif st.session_state.show_correction:
     st.error("Erreur sur le verbe précédent :")
     v = st.session_state.last_verb
@@ -200,7 +203,6 @@ elif st.session_state.show_correction:
         st.session_state.show_correction = False
         st.rerun()
 
-# Interface de pratique
 elif st.session_state.current_verb is not None:
     progress = st.session_state.total_in_session - len(st.session_state.current_queue)
     st.progress(progress / st.session_state.total_in_session, text=f"Verbe {progress} / {st.session_state.total_in_session}")
@@ -221,7 +223,6 @@ elif st.session_state.current_verb is not None:
         if submitted:
             success = True
             for col_name in missing_cols:
-                # Tolérance pour les espaces et la casse
                 expected = str(v[col_name]).strip().lower()
                 user_ans = str(user_inputs[col_name]).strip().lower()
                 if user_ans != expected:
@@ -231,13 +232,14 @@ elif st.session_state.current_verb is not None:
                 st.session_state.score += 1
                 if v.name in st.session_state.error_list:
                     st.session_state.error_list.remove(v.name)
+                    controller.set('toeic_errors', st.session_state.error_list)
             else:
                 if v.name not in st.session_state.error_list:
                     st.session_state.error_list.append(v.name)
+                    controller.set('toeic_errors', st.session_state.error_list)
                 st.session_state.last_verb = v
                 st.session_state.show_correction = True
 
-            # Passage au verbe suivant
             if st.session_state.current_queue:
                 idx = st.session_state.current_queue.pop(0)
                 st.session_state.current_verb = df.iloc[idx]
@@ -247,7 +249,6 @@ elif st.session_state.current_verb is not None:
             
             st.rerun()
 
-# Fin de session
 else:
     st.success(f"Session terminée ! Score : {st.session_state.score} / {st.session_state.total_in_session}")
     if st.button("Retour au menu", use_container_width=True):
