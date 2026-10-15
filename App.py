@@ -235,6 +235,15 @@ class IUserDataRepository(ABC):
     def create_user(self, username: str, pin_hash: str) -> None: pass
 
     @abstractmethod
+    def list_all_users(self) -> List[str]: pass
+
+    @abstractmethod
+    def update_user_pin(self, username: str, new_pin_hash: str) -> bool: pass
+
+    @abstractmethod
+    def delete_user(self, username: str) -> bool: pass
+
+    @abstractmethod
     def get_errors(self, username: str) -> List[int]: pass
 
     @abstractmethod
@@ -299,14 +308,14 @@ class GoogleSheetsUserRepository(IUserDataRepository):
         return None, None
 
     def _ensure_cache(self, username: str):
-        if "db_cache" not in st.session_state or st.session_state.db_cache.get("username") != username:
+        if "db_cache" not in st.session_state or st.session_state.db_cache.get("username", "").lower() != username.strip().lower():
             row_idx, row_data = self._find_user_row(username)
             if row_data:
                 raw_session = json.loads(row_data.get("session_json") or "{}")
                 failures = {int(k): int(v) for k, v in raw_session.get("_failures", {}).items()}
                 paused = {k: v for k, v in raw_session.items() if k != "_failures"}
                 st.session_state.db_cache = {
-                    "username": username,
+                    "username": str(row_data.get("username", username)).strip(),
                     "row_idx": row_idx,
                     "pin_hash": str(row_data.get("pin_hash", "")),
                     "errors": json.loads(row_data.get("errors_json") or "[]"),
@@ -315,7 +324,7 @@ class GoogleSheetsUserRepository(IUserDataRepository):
                     "srs": json.loads(row_data.get("srs_json") or "{}")
                 }
             else:
-                st.session_state.db_cache = {"username": None}
+                st.session_state.db_cache = {"username": ""}
 
     def get_user_pin_hash(self, username: str) -> Optional[str]:
         _, row_data = self._find_user_row(username)
@@ -325,7 +334,24 @@ class GoogleSheetsUserRepository(IUserDataRepository):
         self.ws.append_row([username.strip(), pin_hash, "[]", "{}", "{}"])
         if "db_cache" in st.session_state:
             del st.session_state["db_cache"]
-        self._ensure_cache(username)
+
+    def list_all_users(self) -> List[str]:
+        records = self.ws.get_all_records()
+        return [str(r.get("username", "")).strip() for r in records if str(r.get("username", "")).strip()]
+
+    def update_user_pin(self, username: str, new_pin_hash: str) -> bool:
+        row_idx, _ = self._find_user_row(username)
+        if not row_idx:
+            return False
+        self.ws.update_cell(row_idx, 2, new_pin_hash)
+        return True
+
+    def delete_user(self, username: str) -> bool:
+        row_idx, _ = self._find_user_row(username)
+        if not row_idx:
+            return False
+        self.ws.delete_rows(row_idx)
+        return True
 
     def get_errors(self, username: str) -> List[int]:
         self._ensure_cache(username)
@@ -396,7 +422,9 @@ class GoogleSheetsUserRepository(IUserDataRepository):
 # =====================================================================
 
 class AuthService:
-    """Gère l'authentification par Pseudo + Code PIN à 4 chiffres."""
+    """Gère l'authentification par Pseudo + Code PIN à 4 chiffres et les droits Admin."""
+
+    ADMIN_USERNAME = "alexis"
 
     def __init__(self, user_repo: IUserDataRepository):
         self.user_repo = user_repo
@@ -409,6 +437,10 @@ class AuthService:
     def is_valid_pin(pin: str) -> bool:
         return len(pin.strip()) == 4 and pin.strip().isdigit()
 
+    @classmethod
+    def is_admin(cls, username: str) -> bool:
+        return username.strip().lower() == cls.ADMIN_USERNAME
+
     def login(self, username: str, pin: str) -> Tuple[bool, str]:
         username = username.strip()
         if not username:
@@ -418,24 +450,45 @@ class AuthService:
         
         stored_hash = self.user_repo.get_user_pin_hash(username)
         if not stored_hash:
-            return False, "Ce pseudo n'existe pas. Crée un compte d'abord."
+            # Si le compte Admin Alexis n'existe pas encore, on l'initialise automatiquement
+            if self.is_admin(username):
+                self.user_repo.create_user("Alexis", self._hash_pin(pin))
+                return True, "Compte Administrateur initialisé."
+            return False, "Ce compte n'existe pas. Demande à Alexis de te créer un accès."
         
         if stored_hash != self._hash_pin(pin):
             return False, "Code PIN incorrect."
         return True, "Connexion réussie."
 
-    def register(self, username: str, pin: str) -> Tuple[bool, str]:
-        username = username.strip()
-        if not username:
-            return False, "Entre un pseudo."
+    def admin_create_user(self, admin_user: str, new_username: str, pin: str) -> Tuple[bool, str]:
+        if not self.is_admin(admin_user):
+            return False, "Action réservée à l'administrateur."
+        new_username = new_username.strip()
+        if not new_username:
+            return False, "Entre un pseudo valide."
         if not self.is_valid_pin(pin):
             return False, "Le code PIN doit contenir exactement 4 chiffres."
+        if self.user_repo.get_user_pin_hash(new_username) is not None:
+            return False, "Ce pseudo existe déjà."
         
-        if self.user_repo.get_user_pin_hash(username) is not None:
-            return False, "Ce pseudo est déjà pris."
-        
-        self.user_repo.create_user(username, self._hash_pin(pin))
-        return True, "Compte créé avec succès."
+        self.user_repo.create_user(new_username, self._hash_pin(pin))
+        return True, f"Le compte '{new_username}' a été créé avec succès."
+
+    def admin_reset_pin(self, admin_user: str, target_user: str, new_pin: str) -> Tuple[bool, str]:
+        if not self.is_admin(admin_user):
+            return False, "Action réservée à l'administrateur."
+        if not self.is_valid_pin(new_pin):
+            return False, "Le nouveau code PIN doit contenir exactement 4 chiffres."
+        ok = self.user_repo.update_user_pin(target_user, self._hash_pin(new_pin))
+        return (True, f"Code PIN de '{target_user}' mis à jour.") if ok else (False, "Utilisateur introuvable.")
+
+    def admin_delete_user(self, admin_user: str, target_user: str) -> Tuple[bool, str]:
+        if not self.is_admin(admin_user):
+            return False, "Action réservée à l'administrateur."
+        if self.is_admin(target_user):
+            return False, "Impossible de supprimer le compte administrateur."
+        ok = self.user_repo.delete_user(target_user)
+        return (True, f"Compte '{target_user}' supprimé.") if ok else (False, "Utilisateur introuvable.")
 
 
 class EvaluationService:
@@ -455,7 +508,6 @@ class EvaluationService:
     @staticmethod
     def _normalize_french(token: str) -> str:
         token = token.strip().lower().replace("’", "'")
-        # Supprime les accents pour tolérer les oublis sur clavier mobile
         token = ''.join(
             c for c in unicodedata.normalize('NFD', token)
             if unicodedata.category(c) != 'Mn'
@@ -540,7 +592,6 @@ class SRSService:
         introduced_today = sum(1 for c in cards.values() if c.introduced_date == today_str)
         remaining_new_quota = max(0, self.MAX_NEW_PER_DAY - introduced_today)
 
-        # Introduction dans l'ordre exact de fréquence du TOEIC (du plus fréquent au plus rare)
         if remaining_new_quota > 0:
             all_verb_ids = [v.id for v in self.verb_repo.get_all()]
             unseen_ids = [vid for vid in all_verb_ids if vid not in cards]
@@ -709,10 +760,11 @@ class AppController:
             "total": 0,
             "last_eval": None,
             "unsaved_count": 0,
-            # État Flashcards
-            "fc_active": False,
+            # État Flashcards & Catalogue
+            "fc_mode_running": None,     # None, "catalogue", "random"
             "fc_queue": [],
             "flashcard_revealed": False,
+            "cat_audio_id": None,
             # État SRS
             "srs_active": False,
             "srs_current_card": None,
@@ -749,67 +801,57 @@ class AppController:
             return
 
         user = st.session_state.current_user
+        is_admin = self.auth_service.is_admin(user)
 
         # Barre supérieure utilisateur
         col_u1, col_u2 = st.columns([3, 1])
         with col_u1:
-            st.caption(f"👤 Connecté : **{user}**")
+            badge = "👑 Administrateur" if is_admin else "👤 Connecté"
+            st.caption(f"{badge} : **{user}**")
         with col_u2:
             if st.button("Déconnexion"):
                 self.user_repo.flush_all(user)
                 st.session_state.current_user = None
                 st.rerun()
 
-        # Navigation principale par onglets mobiles
-        tab_srs, tab_train, tab_fc, tab_stats = st.tabs([
-            "🧠 SRS (Anki)",
-            "🎯 S'entraîner",
-            "🗂️ Flashcards",
-            "📊 Statistiques"
-        ])
+        # Navigation par onglets (avec 5e onglet Admin visible uniquement par Alexis)
+        tab_Titles = ["🧠 SRS (Anki)", "🎯 S'entraîner", "🗂️ Flashcards", "📊 Statistiques"]
+        if is_admin:
+            tab_Titles.append("🛠️ Admin")
 
-        with tab_srs:
+        tabs = st.tabs(tab_Titles)
+
+        with tabs[0]:
             self._render_srs_tab(user)
-        with tab_train:
+        with tabs[1]:
             self._render_training_tab(user)
-        with tab_fc:
+        with tabs[2]:
             self._render_flashcards_tab(user)
-        with tab_stats:
+        with tabs[3]:
             self._render_stats_tab(user)
+        if is_admin:
+            with tabs[4]:
+                self._render_admin_tab(user)
 
         self._disable_mobile_autocorrect()
 
     # -----------------------------------------------------------------
-    # VUE : AUTHENTIFICATION
+    # VUE : AUTHENTIFICATION (VERROUILLÉE SANS INSCRIPTION PUBLIQUE)
     # -----------------------------------------------------------------
     def _render_auth_view(self):
-        st.subheader("Identification")
-        tab_login, tab_reg = st.tabs(["Connexion", "Créer un compte"])
+        st.subheader("Connexion")
+        st.caption("Accès privé. Demande tes identifiants à Alexis si tu n'as pas de compte.")
 
-        with tab_login:
-            with st.form("login_form"):
-                u_login = st.text_input("Pseudo :")
-                p_login = st.text_input("Code PIN (4 chiffres) :", type="password", max_chars=4)
-                if st.form_submit_button("Se connecter", type="primary", use_container_width=True):
-                    ok, msg = self.auth_service.login(u_login, p_login)
-                    if ok:
-                        st.session_state.current_user = u_login.strip()
-                        st.rerun()
-                    else:
-                        st.error(msg)
-
-        with tab_reg:
-            with st.form("reg_form"):
-                u_reg = st.text_input("Choisis un pseudo :")
-                p_reg = st.text_input("Choisis un code PIN (4 chiffres) :", type="password", max_chars=4)
-                if st.form_submit_button("Créer mon compte", type="primary", use_container_width=True):
-                    ok, msg = self.auth_service.register(u_reg, p_reg)
-                    if ok:
-                        st.session_state.current_user = u_reg.strip()
-                        st.success(msg)
-                        st.rerun()
-                    else:
-                        st.error(msg)
+        with st.form("login_form"):
+            u_login = st.text_input("Pseudo :")
+            p_login = st.text_input("Code PIN (4 chiffres) :", type="password", max_chars=4)
+            if st.form_submit_button("Se connecter", type="primary", use_container_width=True):
+                ok, msg = self.auth_service.login(u_login, p_login)
+                if ok:
+                    st.session_state.current_user = u_login.strip()
+                    st.rerun()
+                else:
+                    st.error(msg)
 
     # -----------------------------------------------------------------
     # ONGLET 1 : MODE SRS (ANKI)
@@ -866,15 +908,12 @@ class AppController:
         if given_c != "Translation":
             st.audio(self.audio_service.get_audio(v.get_field(given_c)), format="audio/mp3")
 
-        # Étape 1 : Saisie active
         if st.session_state.srs_eval_result is None:
             with st.form("srs_form", clear_on_submit=True):
                 user_inputs = {col: st.text_input(f"{col} :", autocomplete="off") for col in missing_cols}
                 if st.form_submit_button("Vérifier ma réponse", type="primary", use_container_width=True):
                     st.session_state.srs_eval_result = self.eval_service.evaluate(v, given_c, user_inputs)
                     st.rerun()
-
-        # Étape 2 : Correction complète + Grille 2x2 de boutons d'intervalles
         else:
             res: EvaluationResult = st.session_state.srs_eval_result
             if res.status == "EXACT":
@@ -894,7 +933,6 @@ class AppController:
             st.markdown("##### Choisis l'intervalle de répétition :")
             labels = self.srs_service.get_button_labels(card)
 
-            # Grille 2x2 ergonomique pour écran de téléphone
             row1_col1, row1_col2 = st.columns(2)
             with row1_col1:
                 if st.button(labels["again"], use_container_width=True):
@@ -932,11 +970,9 @@ class AppController:
         errors = self.user_repo.get_errors(user)
         paused = self.user_repo.get_paused_session(user)
 
-        # Écran de configuration si aucun entraînement n'est actif
         if not st.session_state.training_active:
             st.subheader("S'entraîner par listes")
 
-            # 1. Option de reprise si une session est en pause
             if paused and paused.get("current_idx") is not None:
                 rem = len(paused.get("queue", [])) + 1
                 st.info(f"⏸️ Session en pause : **{rem} verbe(s) restant(s)** (Score : {paused.get('score', 0)}/{paused.get('total', 0)}).")
@@ -953,7 +989,6 @@ class AppController:
                     st.rerun()
                 st.write("---")
 
-            # 2. Configuration d'une nouvelle session
             tr_source = st.radio(
                 "Source Entraînement :",
                 ["Tous les verbes (127)", f"Mes erreurs ({len(errors)})"],
@@ -995,8 +1030,6 @@ class AppController:
                     st.rerun()
             return
 
-        # --- ENTRAÎNEMENT ACTIF ---
-        # 1. Écran de retour sur erreur ou réponse incomplète
         if st.session_state.last_eval is not None:
             res: EvaluationResult = st.session_state.last_eval
             v = res.verb
@@ -1019,7 +1052,6 @@ class AppController:
                 st.rerun()
             return
 
-        # 2. Fin de session
         if st.session_state.current_idx is None:
             self.user_repo.flush_all(user)
             st.success(f"🎉 Session terminée ! Score : **{st.session_state.score} / {st.session_state.total}**")
@@ -1028,7 +1060,6 @@ class AppController:
                 st.rerun()
             return
 
-        # 3. Saisie active
         done_count = st.session_state.total - len(st.session_state.queue)
         st.progress(done_count / st.session_state.total, text=f"Verbe {done_count} / {st.session_state.total}")
 
@@ -1101,12 +1132,13 @@ class AppController:
                 st.rerun()
 
     # -----------------------------------------------------------------
-    # ONGLET 3 : FLASHCARDS (CATALOGUE & DÉFILEMENT)
+    # ONGLET 3 : FLASHCARDS (CATALOGUE DÉROULANT & DÉFILEMENT ALÉATOIRE)
     # -----------------------------------------------------------------
     def _render_flashcards_tab(self, user: str):
         errors = self.user_repo.get_errors(user)
 
-        if not st.session_state.fc_active:
+        # 1. Écran de configuration initial
+        if st.session_state.fc_mode_running is None:
             st.subheader("Flashcards (Catalogue & Révision)")
             fc_source = st.radio(
                 "Source :",
@@ -1115,57 +1147,97 @@ class AppController:
             )
             fc_style = st.radio(
                 "Méthode :",
-                ["Catalogue (Choisir les verbes)", "Défilement aléatoire"],
+                ["Catalogue (Liste complète à faire défiler)", "Défilement aléatoire (Carte par carte)"],
                 key="fc_style"
             )
 
-            source_verbs = (
-                [self.verb_repo.get_by_id(i) for i in errors]
-                if fc_source.startswith("Mes erreurs")
-                else self.verb_repo.get_all()
-            )
+            level_filter = "Tous"
+            if fc_source.startswith("Tous"):
+                level_filter = st.selectbox("Filtrer par niveau :", ["Tous", "A1", "A2", "B1", "B2"], key="fc_lvl")
 
-            selected_fc_ids = []
-            if fc_style == "Catalogue (Choisir les verbes)":
+            btn_label = "📖 Ouvrir le catalogue" if fc_style.startswith("Catalogue") else "🎲 Lancer les Flashcards aléatoires"
+            if st.button(btn_label, type="primary", use_container_width=True):
+                source_verbs = (
+                    [self.verb_repo.get_by_id(i) for i in errors]
+                    if fc_source.startswith("Mes erreurs")
+                    else self.verb_repo.get_all()
+                )
+                if level_filter != "Tous" and fc_source.startswith("Tous"):
+                    source_verbs = [v for v in source_verbs if v.level == level_filter]
+
                 if not source_verbs:
-                    st.caption("Aucun verbe disponible dans cette source.")
+                    st.warning("Aucun verbe disponible dans cette sélection.")
                 else:
-                    options_map = {f"[{v.level}] {v.infinitive} ({v.translation})": v.id for v in source_verbs}
-                    chosen_labels = st.multiselect(
-                        "Recherche et sélectionne tes verbes :",
-                        options=list(options_map.keys())
-                    )
-                    selected_fc_ids = [options_map[lbl] for lbl in chosen_labels]
-
-                    if selected_fc_ids and st.checkbox("Afficher directement la fiche récapitulative ici"):
-                        for vid in selected_fc_ids:
-                            vb = self.verb_repo.get_by_id(vid)
-                            with st.expander(f"**{vb.infinitive}** ({vb.level}) — {vb.translation}"):
-                                st.write(f"**Prétérit :** `{vb.preterit}` | **Participe Passé :** `{vb.past_participle}`")
-                                st.audio(self.audio_service.get_audio(f"{vb.infinitive}, {vb.preterit}, {vb.past_participle}"), format="audio/mp3")
-
-            if st.button("Lancer les Flashcards", type="primary", use_container_width=True):
-                if not source_verbs:
-                    st.warning("Aucune erreur enregistrée pour le moment.")
-                elif fc_style == "Catalogue (Choisir les verbes)" and not selected_fc_ids:
-                    st.warning("Sélectionne au moins un verbe dans le catalogue.")
-                else:
-                    if fc_style == "Catalogue (Choisir les verbes)":
-                        st.session_state.fc_queue = list(selected_fc_ids)
+                    ids = [v.id for v in source_verbs]
+                    if fc_style.startswith("Catalogue"):
+                        st.session_state.fc_queue = ids
+                        st.session_state.cat_audio_id = None
+                        st.session_state.fc_mode_running = "catalogue"
                     else:
-                        ids = [v.id for v in source_verbs]
                         random.shuffle(ids)
                         st.session_state.fc_queue = ids
-                    st.session_state.flashcard_revealed = False
-                    st.session_state.fc_active = True
+                        st.session_state.flashcard_revealed = False
+                        st.session_state.fc_mode_running = "random"
                     st.rerun()
             return
 
-        # Défilement actif des flashcards
+        # 2. MODE CATALOGUE : Liste verticale déroulante avec Traduction en haut et les 3 temps en dessous
+        if st.session_state.fc_mode_running == "catalogue":
+            top_c1, top_c2 = st.columns([3, 1])
+            with top_c1:
+                st.subheader(f"Catalogue ({len(st.session_state.fc_queue)} verbes)")
+            with top_c2:
+                if st.button("⬅️ Retour", use_container_width=True):
+                    st.session_state.fc_mode_running = None
+                    st.rerun()
+
+            search_query = st.text_input("🔍 Filtrer par mot (français ou anglais) :", placeholder="Ex: écrire, write, commencer...")
+            q_norm = EvaluationService._normalize_french(search_query) if search_query else ""
+
+            verbs_to_show = [self.verb_repo.get_by_id(vid) for vid in st.session_state.fc_queue]
+            if q_norm:
+                verbs_to_show = [
+                    v for v in verbs_to_show
+                    if q_norm in EvaluationService._normalize_french(v.translation)
+                    or q_norm in v.infinitive.lower()
+                    or q_norm in v.preterit.lower()
+                    or q_norm in v.past_participle.lower()
+                ]
+
+            st.caption(f"Affichage de **{len(verbs_to_show)}** verbe(s) — Fais défiler la liste vers le bas :")
+
+            for v in verbs_to_show:
+                with st.container(border=True):
+                    col_txt, col_aud = st.columns([5, 1])
+                    with col_txt:
+                        # Traduction française en haut en gras + Niveau
+                        st.markdown(f"**🇫🇷 {v.translation}** &nbsp; `[{v.level}]`")
+                        # Les 3 temps anglais directement visibles juste en dessous
+                        st.markdown(
+                            f"🇬🇧 **Inf :** `{v.infinitive}` &nbsp;|&nbsp; "
+                            f"**Prét :** `{v.preterit}` &nbsp;|&nbsp; "
+                            f"**Part :** `{v.past_participle}`"
+                        )
+                    with col_aud:
+                        if st.button("🔊", key=f"aud_btn_{v.id}", help="Écouter la prononciation"):
+                            st.session_state.cat_audio_id = v.id
+
+                    if st.session_state.cat_audio_id == v.id:
+                        st.audio(
+                            self.audio_service.get_audio(f"{v.infinitive}, {v.preterit}, {v.past_participle}"),
+                            format="audio/mp3"
+                        )
+
+            if st.button("⬅️ Fermer le catalogue", use_container_width=True):
+                st.session_state.fc_mode_running = None
+                st.rerun()
+            return
+
+        # 3. MODE DÉFILEMENT ALÉATOIRE (Carte par carte)
         if not st.session_state.fc_queue:
-            st.success("Toutes les flashcards sélectionnées ont été révisées !")
-            if st.button("Retour au catalogue", type="primary", use_container_width=True):
-                st.session_state.fc_active = False
+            st.success("🎉 Toutes les flashcards ont été révisées !")
+            if st.button("Retour", type="primary", use_container_width=True):
+                st.session_state.fc_mode_running = None
                 st.rerun()
             return
 
@@ -1193,7 +1265,7 @@ class AppController:
 
         st.write("---")
         if st.button("Quitter les flashcards", use_container_width=True):
-            st.session_state.fc_active = False
+            st.session_state.fc_mode_running = None
             st.rerun()
 
     # -----------------------------------------------------------------
@@ -1225,6 +1297,64 @@ class AppController:
                     f"- **[{vb.level}] {vb.infinitive}** (`{vb.preterit}`, `{vb.past_participle}`) "
                     f"— *{vb.translation}* : **{count} erreur(s)**"
                 )
+
+    # -----------------------------------------------------------------
+    # ONGLET 5 : ADMINISTRATION DES COMPTES (RÉSERVÉ À ALEXIS)
+    # -----------------------------------------------------------------
+    def _render_admin_tab(self, admin_user: str):
+        st.subheader("🛠️ Gestion des comptes (Modérateur)")
+        st.caption("Seul toi (Alexis) as accès à cet onglet. Personne ne peut créer de compte sans passer par toi.")
+
+        # 1. Créer un compte pour un camarade
+        st.markdown("#### ➕ Créer un nouvel accès")
+        with st.form("admin_create_user_form", clear_on_submit=True):
+            new_u = st.text_input("Pseudo du camarade :")
+            new_p = st.text_input("Code PIN attribué (4 chiffres) :", max_chars=4)
+            if st.form_submit_button("Créer ce compte", type="primary", use_container_width=True):
+                ok, msg = self.auth_service.admin_create_user(admin_user, new_u, new_p)
+                if ok:
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
+
+        st.write("---")
+
+        # 2. Gérer les comptes existants
+        st.markdown("#### 👥 Comptes enregistrés")
+        all_users = self.user_repo.list_all_users()
+        if not all_users:
+            st.caption("Aucun utilisateur trouvé.")
+            return
+
+        st.write(f"**Utilisateurs actifs ({len(all_users)}) :** " + ", ".join(f"`{u}`" for u in all_users))
+
+        other_users = [u for u in all_users if not self.auth_service.is_admin(u)]
+        if other_users:
+            st.markdown("##### Modifier ou supprimer un camarade")
+            selected_u = st.selectbox("Sélectionner un utilisateur :", other_users)
+            col_pin, col_del = st.columns(2)
+
+            with col_pin:
+                with st.form("reset_pin_form", clear_on_submit=True):
+                    reset_p = st.text_input("Nouveau PIN (4 chiffres) :", max_chars=4)
+                    if st.form_submit_button("Changer le PIN", use_container_width=True):
+                        ok, msg = self.auth_service.admin_reset_pin(admin_user, selected_u, reset_p)
+                        if ok:
+                            st.success(msg)
+                        else:
+                            st.error(msg)
+
+            with col_del:
+                st.write("")
+                st.write("")
+                if st.button(f"🗑️ Supprimer '{selected_u}'", use_container_width=True):
+                    ok, msg = self.auth_service.admin_delete_user(admin_user, selected_u)
+                    if ok:
+                        st.success(msg)
+                        st.rerun()
+                    else:
+                        st.error(msg)
 
 
 # =====================================================================
