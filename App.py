@@ -207,11 +207,11 @@ B2;kneel;kneeled/knelt;kneeled/knelt;s'agenouiller"""
         self._verbs: List[Verb] = [
             Verb(
                 id=int(idx),
-                level=row["Level"].strip(),
-                infinitive=row["Infinitive"].strip(),
-                preterit=row["Preterit"].strip(),
-                past_participle=row["Past Participle"].strip(),
-                translation=row["Translation"].strip()
+                level=str(row["Level"]).strip(),
+                infinitive=str(row["Infinitive"]).strip(),
+                preterit=str(row["Preterit"]).strip(),
+                past_participle=str(row["Past Participle"]).strip(),
+                translation=str(row["Translation"]).strip()
             )
             for idx, row in df.iterrows()
         ]
