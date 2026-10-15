@@ -268,6 +268,9 @@ class IUserDataRepository(ABC):
     def save_srs_cards(self, username: str, cards: Dict[int, SRSCard], flush: bool = True) -> None: pass
 
     @abstractmethod
+    def update_login_streak(self, username: str) -> int: pass
+
+    @abstractmethod
     def flush_all(self, username: str) -> None: pass
 
 
@@ -313,7 +316,10 @@ class GoogleSheetsUserRepository(IUserDataRepository):
             if row_data:
                 raw_session = json.loads(row_data.get("session_json") or "{}")
                 failures = {int(k): int(v) for k, v in raw_session.get("_failures", {}).items()}
-                paused = {k: v for k, v in raw_session.items() if k != "_failures"}
+                streak = int(raw_session.get("_streak", 0))
+                last_login = str(raw_session.get("_last_login", ""))
+                paused = {k: v for k, v in raw_session.items() if not str(k).startswith("_")}
+                
                 st.session_state.db_cache = {
                     "username": str(row_data.get("username", username)).strip(),
                     "row_idx": row_idx,
@@ -321,6 +327,8 @@ class GoogleSheetsUserRepository(IUserDataRepository):
                     "errors": json.loads(row_data.get("errors_json") or "[]"),
                     "paused": paused,
                     "failures": failures,
+                    "streak": streak,
+                    "last_login": last_login,
                     "srs": json.loads(row_data.get("srs_json") or "{}")
                 }
             else:
@@ -397,6 +405,29 @@ class GoogleSheetsUserRepository(IUserDataRepository):
         if flush:
             self.flush_all(username)
 
+    def update_login_streak(self, username: str) -> int:
+        self._ensure_cache(username)
+        today = datetime.now().strftime("%Y-%m-%d")
+        last_login = st.session_state.db_cache.get("last_login", "")
+        streak = st.session_state.db_cache.get("streak", 0)
+
+        if last_login == today:
+            return streak
+
+        if last_login:
+            yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+            if last_login == yesterday:
+                streak += 1
+            else:
+                streak = 1
+        else:
+            streak = 1
+
+        st.session_state.db_cache["last_login"] = today
+        st.session_state.db_cache["streak"] = streak
+        self.flush_all(username)
+        return streak
+
     def flush_all(self, username: str) -> None:
         """Envoie toutes les modifications à Google Sheets en une seule requête groupée."""
         self._ensure_cache(username)
@@ -406,6 +437,8 @@ class GoogleSheetsUserRepository(IUserDataRepository):
             return
         combined_session = dict(cache.get("paused", {}))
         combined_session["_failures"] = {str(k): v for k, v in cache.get("failures", {}).items()}
+        combined_session["_streak"] = cache.get("streak", 0)
+        combined_session["_last_login"] = cache.get("last_login", "")
         
         self.ws.update(
             range_name=f"C{row_idx}:E{row_idx}",
@@ -450,7 +483,6 @@ class AuthService:
         
         stored_hash = self.user_repo.get_user_pin_hash(username)
         if not stored_hash:
-            # Si le compte Admin Alexis n'existe pas encore, on l'initialise automatiquement
             if self.is_admin(username):
                 self.user_repo.create_user("Alexis", self._hash_pin(pin))
                 return True, "Compte Administrateur initialisé."
@@ -802,12 +834,13 @@ class AppController:
 
         user = st.session_state.current_user
         is_admin = self.auth_service.is_admin(user)
+        streak_count = self.user_repo.update_login_streak(user)
 
         # Barre supérieure utilisateur
         col_u1, col_u2 = st.columns([3, 1])
         with col_u1:
             badge = "👑 Administrateur" if is_admin else "👤 Connecté"
-            st.caption(f"{badge} : **{user}**")
+            st.caption(f"{badge} : **{user}** &nbsp;|&nbsp; 🔥 **{streak_count} jour(s)**")
         with col_u2:
             if st.button("Déconnexion"):
                 self.user_repo.flush_all(user)
@@ -1137,7 +1170,6 @@ class AppController:
     def _render_flashcards_tab(self, user: str):
         errors = self.user_repo.get_errors(user)
 
-        # 1. Écran de configuration initial
         if st.session_state.fc_mode_running is None:
             st.subheader("Flashcards (Catalogue & Révision)")
             fc_source = st.radio(
@@ -1181,7 +1213,6 @@ class AppController:
                     st.rerun()
             return
 
-        # 2. MODE CATALOGUE : Liste verticale déroulante avec Traduction en haut et les 3 temps en dessous
         if st.session_state.fc_mode_running == "catalogue":
             top_c1, top_c2 = st.columns([3, 1])
             with top_c1:
@@ -1210,9 +1241,7 @@ class AppController:
                 with st.container(border=True):
                     col_txt, col_aud = st.columns([5, 1])
                     with col_txt:
-                        # Traduction française en haut en gras + Niveau
                         st.markdown(f"**🇫🇷 {v.translation}** &nbsp; `[{v.level}]`")
-                        # Les 3 temps anglais directement visibles juste en dessous
                         st.markdown(
                             f"🇬🇧 **Inf :** `{v.infinitive}` &nbsp;|&nbsp; "
                             f"**Prét :** `{v.preterit}` &nbsp;|&nbsp; "
@@ -1233,7 +1262,6 @@ class AppController:
                 st.rerun()
             return
 
-        # 3. MODE DÉFILEMENT ALÉATOIRE (Carte par carte)
         if not st.session_state.fc_queue:
             st.success("🎉 Toutes les flashcards ont été révisées !")
             if st.button("Retour", type="primary", use_container_width=True):
@@ -1305,7 +1333,6 @@ class AppController:
         st.subheader("🛠️ Gestion des comptes (Modérateur)")
         st.caption("Seul toi (Alexis) as accès à cet onglet. Personne ne peut créer de compte sans passer par toi.")
 
-        # 1. Créer un compte pour un camarade
         st.markdown("#### ➕ Créer un nouvel accès")
         with st.form("admin_create_user_form", clear_on_submit=True):
             new_u = st.text_input("Pseudo du camarade :")
@@ -1320,7 +1347,6 @@ class AppController:
 
         st.write("---")
 
-        # 2. Gérer les comptes existants
         st.markdown("#### 👥 Comptes enregistrés")
         all_users = self.user_repo.list_all_users()
         if not all_users:
