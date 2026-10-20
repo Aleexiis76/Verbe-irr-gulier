@@ -384,6 +384,26 @@ class SRSService:
         self.verb_repo = verb_repo
         self.user_repo = user_repo
 
+    def get_daily_summary(self, username: str) -> Tuple[int, int, int]:
+        """Retourne (nouveaux_du_jour, a_revoir_maintenant, en_attente_minutes) sans modifier la base."""
+        cards = self.user_repo.get_srs_cards(username)
+        now = datetime.now()
+        today_str = now.strftime("%Y-%m-%d")
+
+        introduced_today = sum(1 for c in cards.values() if c.introduced_date == today_str)
+        quota = max(0, self.MAX_NEW_PER_DAY - introduced_today)
+        unseen_count = sum(1 for v in self.verb_repo.get_all() if v.id not in cards)
+        new_available = min(quota, unseen_count)
+
+        due_new = sum(
+            1 for c in cards.values()
+            if c.is_due(now) and c.introduced_date == today_str and c.state == "learning" and c.step == 0
+        )
+        due_reviews = sum(1 for c in cards.values() if c.is_due(now)) - due_new
+        waiting = sum(1 for c in cards.values() if not c.is_due(now) and c.state == "learning")
+
+        return (new_available + due_new), due_reviews, waiting
+        
     def get_daily_queue(self, username: str, force_early: bool = False) -> Tuple[List[SRSCard], int]:
         cards = self.user_repo.get_srs_cards(username)
         now = datetime.now()
