@@ -139,6 +139,14 @@ class AppController:
         st.subheader("Mémoire à long terme (SRS)")
         if not st.session_state.srs_active:
             st.caption("10 nouveaux verbes/jour max (par ordre de fréquence TOEIC) + révisions espacées.")
+            
+            # Affichage des compteurs avant le lancement
+            new_cnt, rev_cnt, wait_cnt = self.srs.get_daily_summary(user)
+            c1, c2, c3 = st.columns(3)
+            c1.metric("🆕 Nouveaux", new_cnt)
+            c2.metric("🔄 À revoir", rev_cnt)
+            c3.metric("⏳ En pause (<10m)", wait_cnt)
+
             if st.button("Lancer ma session SRS du jour", type="primary", use_container_width=True):
                 st.session_state.update(srs_active=True, srs_current_card=None, srs_eval_result=None, srs_force_early=False)
                 st.rerun()
@@ -146,19 +154,20 @@ class AppController:
 
         if st.session_state.srs_current_card is None:
             due, waiting = self.srs.get_daily_queue(user, force_early=st.session_state.srs_force_early)
-            st.session_state.srs_force_early = False
             if not due:
+                # Toute la file (y compris anticipée) est terminée -> on réinitialise le mode forcé
+                st.session_state.srs_force_early = False
                 if waiting > 0:
                     st.info(f"⏳ **{waiting} verbe(s)** en apprentissage reviennent dans quelques minutes.")
                     c1, c2 = st.columns(2)
                     if c1.button("🔄 Actualiser", use_container_width=True): st.rerun()
-                    if c2.button("⏩ Réviser sans attendre", type="primary", use_container_width=True):
+                    if c2.button("⏩ Réviser toute la liste sans attendre", type="primary", use_container_width=True):
                         st.session_state.srs_force_early = True
                         st.rerun()
                 else:
                     st.success("🎉 Bravo ! Tu as terminé toutes tes révisions SRS du jour.")
                 if st.button("Fermer la session SRS", use_container_width=True):
-                    st.session_state.srs_active = False
+                    st.session_state.update(srs_active=False, srs_force_early=False)
                     st.rerun()
                 return
 
@@ -199,7 +208,7 @@ class AppController:
 
         st.write("---")
         if st.button("Quitter la session SRS", use_container_width=True):
-            st.session_state.update(srs_current_card=None, srs_active=False)
+            st.session_state.update(srs_current_card=None, srs_active=False, srs_force_early=False)
             st.rerun()
 
     def _render_training_tab(self, user: str):
